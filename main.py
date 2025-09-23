@@ -7,7 +7,6 @@ import json
 import os
 from dotenv import load_dotenv
 
-
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
@@ -20,7 +19,6 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 # Load the dataset
 data_path = "data/Cleaned Dataset - Gold_Data.csv"
 data = pd.read_csv(data_path)
-
 
 def llm_parse_query(user_query):
     prompt = f"""
@@ -40,6 +38,7 @@ def llm_parse_query(user_query):
     - include_collaborators
     - include_related_authors
     - show_cgiar_centers
+    - selected_legends (list of node types to display: Author, Co-Author, Publication, Geography, CGIAR Center, Keyword)
     ONLY return JSON, nothing else.
     """
     response = model.generate_content(prompt)
@@ -48,10 +47,9 @@ def llm_parse_query(user_query):
         cleaned = cleaned.strip("`").replace("json", "", 1).strip()
     return json.loads(cleaned)
 
-
 def normalize_filters(filters):
     for k, v in filters.items():
-        if isinstance(v, list):
+        if isinstance(v, list) and k != "selected_legends":
             if len(v) == 1:
                 filters[k] = v[0]
             elif len(v) > 1:
@@ -59,7 +57,6 @@ def normalize_filters(filters):
             else:
                 filters[k] = None
     return filters
-
 
 def apply_filters(df, filters):
     if filters.get("author_name"):
@@ -80,68 +77,96 @@ def apply_filters(df, filters):
         df = df[df["keywords"].str.contains(filters["keywords_filter"], na=False, case=False)]
     return df
 
-
-def build_graph_and_html(filters):
-    G = nx.Graph()
-    df = apply_filters(data.copy(), filters)
+def build_graph_html(df, selected_legends):
     if df.empty:
-        return None, None, "No matching results."
+        return "No matching results."
 
-    df_display = df[['Main Author', 'title', 'geography_focus', 'CGIAR Main Center', 'keywords', 'url']].copy()
-    df_display['title'] = df_display['title'].str[:60] + '...'
-    df_display['keywords'] = df_display['keywords'].astype(str).str[:50] + '...'
-    df_display['url'] = df_display['url'].astype(str).str[:50] + '...'
+    G = nx.Graph()
 
-    # Build author + publication + co-author links
+    # Define node type properties
+    node_types = {
+        "Author": {"color": "lightblue", "title_prefix": "Author: "},
+        "Co-Author": {"color": "yellow", "title_prefix": "Co-Author: "},
+        "Publication": {"color": "lightgreen", "title_prefix": "Publication: "},
+        "Geography": {"color": "orange", "title_prefix": "Geography: "},
+        "CGIAR Center": {"color": "red", "title_prefix": "CGIAR Center: "},
+        "Keyword": {"color": "purple", "title_prefix": "Keyword: "}
+    }
+
     publication_centers = {}
+
     for _, row in df.iterrows():
         pub_title = row["title"]
-        # Add publication node
-        if pub_title not in publication_centers:
-            publication_centers[pub_title] = set()
+
+        if "Publication" in selected_legends:
             G.add_node(pub_title, node_type="Publication", color="lightgreen", title=f"Publication: {pub_title}")
+
         # Main author
-        main_author = row["Main Author"]
-        if pd.notna(main_author):
+        if "Author" in selected_legends and pd.notna(row["Main Author"]):
+            main_author = row["Main Author"]
             G.add_node(main_author, node_type="Author", color="lightblue", title=f"Author: {main_author}")
-            G.add_edge(main_author, pub_title)
+            if "Publication" in selected_legends:
+                G.add_edge(main_author, pub_title)
+
         # Co-authors
-        if pd.notna(row["Corresponding Authors"]) and row["Corresponding Authors"] != "No Data":
+        if "Co-Author" in selected_legends and pd.notna(row["Corresponding Authors"]) and row["Corresponding Authors"] != "No Data":
             for coauthor in [c.strip() for c in str(row["Corresponding Authors"]).split(";") if c.strip()]:
                 G.add_node(coauthor, node_type="Co-Author", color="yellow", title=f"Co-Author: {coauthor}")
-                G.add_edge(coauthor, pub_title)
-        # Centers
-        if pd.notna(row["CGIAR Main Center"]) and row["CGIAR Main Center"] != "No Data":
-            publication_centers[pub_title].add(row["CGIAR Main Center"])
+                if "Publication" in selected_legends:
+                    G.add_edge(coauthor, pub_title)
+
         # Geography
-        if pd.notna(row["geography_focus"]) and row["geography_focus"] != "No Data":
+        if "Geography" in selected_legends and pd.notna(row["geography_focus"]) and row["geography_focus"] != "No Data":
             geography = row["geography_focus"]
             G.add_node(geography, node_type="Geography", color="orange", title=f"Geography: {geography}")
-            G.add_edge(pub_title, geography)
+            if "Publication" in selected_legends:
+                G.add_edge(pub_title, geography)
 
-    # Connect centers + multiple center co-links
-    for pub_title, centers in publication_centers.items():
-        for center in centers:
-            color = "darkred" if len(centers) > 1 else "red"
-            G.add_node(center, node_type="CGIAR Center", color=color, title=f"CGIAR Center: {center}")
-            G.add_edge(pub_title, center)
+        # Keywords
+        if "Keyword" in selected_legends and pd.notna(row["keywords"]) and row["keywords"] != "No Data":
+            for keyword in [k.strip() for k in str(row["keywords"]).split(";") if k.strip()]:
+                G.add_node(keyword, node_type="Keyword", color="purple", title=f"Keyword: {keyword}")
+                if "Publication" in selected_legends:
+                    G.add_edge(pub_title, keyword)
+
+        # Centers collection
+        if "CGIAR Center" in selected_legends:
+            if pub_title not in publication_centers:
+                publication_centers[pub_title] = set()
+            if pd.notna(row["CGIAR Main Center"]) and row["CGIAR Main Center"] != "No Data":
+                publication_centers[pub_title].add(row["CGIAR Main Center"])
+
+    # Connect centers
+    if "CGIAR Center" in selected_legends:
+        for pub_title, centers in publication_centers.items():
+            for center in centers:
+                color = "darkred" if len(centers) > 1 else "red"
+                G.add_node(center, node_type="CGIAR Center", color=color, title=f"CGIAR Center: {center}")
+                if "Publication" in selected_legends:
+                    G.add_edge(pub_title, center)
 
     # PyVis Graph
     net = Network(height="650px", width="100%", bgcolor="#222222", font_color="white", cdn_resources="in_line")
     for node in G.nodes():
         node_data = G.nodes[node]
-        net.add_node(node, label=str(node), color=node_data.get('color', 'lightblue'),
-                     title=node_data.get('title', str(node)))
+        if node_data["node_type"] in selected_legends:
+            net.add_node(node, label=str(node), color=node_data.get('color', 'lightblue'),
+                         title=node_data.get('title', str(node)))
     for edge in G.edges():
-        net.add_edge(edge[0], edge[1])
+        if G.nodes[edge[0]]["node_type"] in selected_legends and G.nodes[edge[1]]["node_type"] in selected_legends:
+            net.add_edge(edge[0], edge[1])
     net.repulsion(node_distance=180, spring_length=180, damping=0.95)
 
     # Save to temp file
     html_file = "graph_llm.html"
     net.save_graph(html_file)
 
-    # Add legend
-    legend_html = """
+    # Dynamic legend based on selected node types
+    legend_items = [
+        f'<span style="color:{props["color"]};">■</span> {node_type}<br>'
+        for node_type, props in node_types.items() if node_type in selected_legends
+    ]
+    legend_html = f"""
     <div style="
         position: fixed;
         top: 20px; right: 20px;
@@ -150,12 +175,7 @@ def build_graph_and_html(filters):
         border-radius: 8px;
         color: white; font-size: 14px;">
       <b>Legend</b><br>
-      <span style="color:lightblue;">■</span> Author<br>
-      <span style="color:yellow;">■</span> Co-Author<br>
-      <span style="color:lightgreen;">■</span> Publication<br>
-      <span style="color:orange;">■</span> Geography<br>
-      <span style="color:red;">■</span> CGIAR Center<br>
-      <span style="color:purple;">■</span> Keyword
+      {"".join(legend_items)}
     </div>
     """
     with open(html_file, "r") as f:
@@ -164,25 +184,57 @@ def build_graph_and_html(filters):
     with open(html_file, "w") as f:
         f.write(html_content)
 
-    return G, df_display, html_content
-
+    return html_content
 
 # Streamlit UI
 st.title("AI Research Dashboard - Graph LLM Analyzer")
 
 user_query = st.text_input("Enter the prompt:")
 
-if user_query:
+process = st.button("Process Query")
+
+legend_options = ["Author", "Co-Author", "Publication", "Geography", "CGIAR Center", "Keyword"]
+
+if 'selected_legends' not in st.session_state:
+    st.session_state.selected_legends = legend_options.copy()
+
+st.subheader("Select Node Types to Display")
+selected_legends = st.multiselect(
+    "Choose legends:",
+    options=legend_options,
+    default=st.session_state.selected_legends
+)
+st.session_state.selected_legends = selected_legends
+
+if process:
     with st.spinner("Processing query..."):
         filters = llm_parse_query(user_query)
         filters = normalize_filters(filters)
-        G, df_display, html_content_or_msg = build_graph_and_html(filters)
+        df = apply_filters(data.copy(), filters)
+        if df.empty:
+            st.session_state.msg = "No matching results."
+            st.session_state.df_display = None
+        else:
+            df_display = df[['Main Author', 'title', 'geography_focus', 'CGIAR Main Center', 'keywords', 'url']].copy()
+            df_display['title'] = df_display['title'].str[:60] + '...'
+            df_display['keywords'] = df_display['keywords'].astype(str).str[:50] + '...'
+            df_display['url'] = df_display['url'].astype(str).str[:50] + '...'
+            st.session_state.df_display = df_display
+            st.session_state.df = df
+            st.session_state.msg = None
+        if filters.get("selected_legends"):
+            st.session_state.selected_legends = filters["selected_legends"]
 
-    if html_content_or_msg == "No matching results.":
-        st.text_area("Output:", value=html_content_or_msg, height=100)
-    else:
+# Display results
+if 'msg' in st.session_state:
+    if st.session_state.msg:
+        st.text_area("Output:", value=st.session_state.msg, height=100)
+    elif 'df_display' in st.session_state and st.session_state.df_display is not None:
         st.subheader("Output DataFrame")
-        st.dataframe(df_display)
+        st.dataframe(st.session_state.df_display)
+
+        with st.spinner("Building graph..."):
+            html_content = build_graph_html(st.session_state.df, st.session_state.selected_legends)
 
         st.subheader("Network Graph")
-        st.components.v1.html(html_content_or_msg, height=700, scrolling=True)
+        st.components.v1.html(html_content, height=700, scrolling=True)
