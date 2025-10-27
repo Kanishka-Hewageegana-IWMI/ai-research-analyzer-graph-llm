@@ -17,7 +17,7 @@ genai.configure(api_key=api_key)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 # Load the dataset
-data_path = "data/Cleaned Dataset - Gold_Data.csv"
+data_path = "data/Updated_Cleaned_Dataset.csv"
 data = pd.read_csv(data_path)
 
 def llm_parse_query(user_query):
